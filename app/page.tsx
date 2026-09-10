@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   Download, FileSpreadsheet, FileText, Lightbulb, MoreVertical,
   Pencil, RotateCcw, Share2, X,
@@ -126,21 +126,40 @@ function RangeField({ label, value, onChange, min, max, step = 1000, prefix = "â
   label: string; value: number; onChange: (value: number) => void;
   min: number; max: number; step?: number; prefix?: string; onInteract?: () => void;
 }) {
+  const labelId = useId();
+  const [editing, setEditing] = useState(false);
+  const [hasEdited, setHasEdited] = useState(false);
+  const [draft, setDraft] = useState(String(value));
+  const numberInputRef = useRef<HTMLInputElement>(null);
+  const pendingCaretRef = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    if (pendingCaretRef.current === null) return;
+    numberInputRef.current?.setSelectionRange(pendingCaretRef.current, pendingCaretRef.current);
+    pendingCaretRef.current = null;
+  }, [draft, hasEdited]);
   const progress = ((value - min) / (max - min)) * 100;
   return (
-    <label className="range-field" onPointerDown={onInteract}>
-      <span>{label}</span>
+    <div className="range-field" onPointerDown={onInteract}>
+      <span id={labelId}>{label}</span>
       <div className="number-wrap">
         {prefix && <span>{prefix}</span>}
         <input
+          ref={numberInputRef}
           className="number-value"
           inputMode="numeric"
-          value={value.toLocaleString("en-IN")}
+          value={editing && hasEdited ? draft : value.toLocaleString("en-IN")}
           aria-label={`${label} value`}
-          onFocus={onInteract}
+          onFocus={() => { setEditing(true); setHasEdited(false); setDraft(String(value)); onInteract?.(); }}
+          onBlur={() => { setEditing(false); setHasEdited(false); }}
           onChange={(event) => {
-            const next = Number(event.target.value.replace(/\D/g, "")) || min;
-            onChange(Math.min(max, Math.max(min, next)));
+            const caret = event.target.selectionStart ?? event.target.value.length;
+            const digitCaret = event.target.value.slice(0, caret).replace(/\D/g, "").length;
+            const raw = event.target.value.replace(/\D/g, "");
+            pendingCaretRef.current = digitCaret;
+            setHasEdited(true);
+            setDraft(raw);
+            if (raw === "") return;
+            onChange(Math.min(max, Math.max(min, Number(raw))));
           }}
         />
       </div>
@@ -150,9 +169,9 @@ function RangeField({ label, value, onChange, min, max, step = 1000, prefix = "â
         type="range" min={min} max={max} step={step} value={value}
         onFocus={onInteract}
         onChange={(event) => onChange(Number(event.target.value))}
-        aria-label={label}
+        aria-labelledby={labelId}
       />
-    </label>
+    </div>
   );
 }
 
