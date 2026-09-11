@@ -422,8 +422,15 @@ export default function Home() {
               sectionNavigationTimerRef.current = window.setTimeout(() => { sectionNavigationRef.current = false; }, 120);
             }
             setDetailsScrolled(nextTop > 4);
-            if (nextTop > lastScrollTop.current + 3) { setChartExpanded(false); setSelectedAge(null); }
-            else if (nextTop < lastScrollTop.current - 3 && !sectionNavigationRef.current) setChartExpanded(true);
+            if (nextTop > lastScrollTop.current + 3) {
+              setChartExpanded(false);
+              setSelectedAge(null);
+            } else if (nextTop < lastScrollTop.current - 3 && nextTop <= 12 && !sectionNavigationRef.current) {
+              // Expanding the sticky chart while deep in the form changes its
+              // height by 262px and makes the content jump beneath it. Restore
+              // the expanded state only once the user has returned to the top.
+              setChartExpanded(true);
+            }
             lastScrollTop.current = nextTop;
             const activationLine = event.currentTarget.getBoundingClientRect().top + (chartExpanded ? 520 : 230);
             const visibleSection = [...detailSections].reverse().find(([, ref]) => ref.current && ref.current.getBoundingClientRect().top <= activationLine);
