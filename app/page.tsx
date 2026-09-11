@@ -208,9 +208,17 @@ function ProjectionChart({ details, dependents, loan, retirementAge, scenario, s
   const tooltipAge = selectedAge ?? (!compact && showStatus ? retirementAge : null);
   const selected = tooltipAge === null ? null : data.find((item) => item.age === tooltipAge) ?? null;
   const firstDepletedAge = data.find((item) => item.corpus <= 0)?.age;
+  const outcomeRanges = useMemo(() => {
+    if (!showOutcomes || !possiblePaths?.length) return null;
+    return data.map((_, yearIndex) => {
+      const values = possiblePaths.map((path) => Math.max(0, path[yearIndex] ?? 0)).sort((a, b) => a - b);
+      const at = (percentile: number) => values[Math.min(values.length - 1, Math.floor((values.length - 1) * percentile))] ?? 0;
+      return { cautious: at(.2), typical: at(.5), optimistic: at(.8) };
+    });
+  }, [data, possiblePaths, showOutcomes]);
 
   return (
-    <div className={`projection-chart ${compact ? "compact" : ""} ${teaser ? "teaser" : ""} ${selected ? "has-selection" : ""}`}>
+    <div className={`projection-chart ${compact ? "compact" : ""} ${teaser ? "teaser" : ""} ${selected ? "has-selection" : ""} ${showOutcomes ? "outcome-mode" : ""}`}>
       {selected && !teaser && (
         <div className="chart-tooltip" role="status">
           <strong>{selected.age}y</strong>
@@ -219,15 +227,8 @@ function ProjectionChart({ details, dependents, loan, retirementAge, scenario, s
         </div>
       )}
       {!teaser && showStatus && retirementAge === null && <div className="chart-warning"><span>⚠</span> Can’t retire with current information</div>}
-      {showOutcomes && possiblePaths && <svg className="outcome-paths" viewBox={`0 0 ${Math.max(1, data.length - 1)} 100`} preserveAspectRatio="none" aria-hidden="true">
-        {possiblePaths.map((path, index) => {
-          const maximum = Math.max(...possiblePaths.flat(), 1);
-          const points = path.map((value, year) => `${year},${100 - Math.min(100, value / maximum * 100)}`).join(" ");
-          return <polyline key={index} points={points} />;
-        })}
-      </svg>}
       <div className="bars-area corpus-area" style={{ height: `${corpusAreaHeight}px` }}>
-        {data.map((item) => (
+        {data.map((item, yearIndex) => (
           <button
             key={`corpus-${item.age}`}
             className={`bar-slot ${item.age === selectedAge ? "selected" : ""} ${item.corpus <= 0 ? "depleted" : ""}`}
@@ -236,7 +237,12 @@ function ProjectionChart({ details, dependents, loan, retirementAge, scenario, s
             aria-label={`Age ${item.age}: corpus ${inr(item.corpus)}`}
           >
             {item.age === firstDepletedAge && <span className="zero-line" />}
-            <span className="bar corpus" style={{ height: `${item.corpus <= 0 ? 0 : Math.max(2, item.corpus * pixelsPerRupee)}px`, "--bar-delay": `${(item.age - details.age) * -90}ms` } as React.CSSProperties} />
+            {outcomeRanges && <span className="outcome-range" aria-hidden="true">
+              <i className="optimistic" style={{ height: `${Math.min(corpusAreaHeight, outcomeRanges[yearIndex].optimistic * pixelsPerRupee)}px` }} />
+              <i className="typical" style={{ height: `${Math.min(corpusAreaHeight, outcomeRanges[yearIndex].typical * pixelsPerRupee)}px` }} />
+              <i className="cautious" style={{ height: `${Math.min(corpusAreaHeight, outcomeRanges[yearIndex].cautious * pixelsPerRupee)}px` }} />
+            </span>}
+            <span className={`bar corpus ${showOutcomes ? "active-outlook" : ""}`} style={{ height: `${item.corpus <= 0 ? 0 : Math.max(2, item.corpus * pixelsPerRupee)}px`, "--bar-delay": `${(item.age - details.age) * -90}ms` } as React.CSSProperties} />
           </button>
         ))}
       </div>
@@ -519,7 +525,7 @@ export default function Home() {
             <ProjectionChart details={details} dependents={dependents} loan={loan} retirementAge={estimatedAge} selectedAge={selectedAge} onSelect={setSelectedAge}
               projectionData={calculatedPlan?.paths[outlook]} possiblePaths={calculatedPlan?.samples} showOutcomes />
             <section className="outcomes-content">
-              <p>Each faint projection is one possible future. Areas where more paths overlap represent outcomes that occurred more often.</p>
+              <p>The overlapping projections show cautious, typical and optimistic outcomes from the same 1,000 possible futures.</p>
               <h2>View this projection as</h2>
               <div className="outlook-options">
                 {(["cautious", "typical", "optimistic"] as const).map((value) => <button key={value} className={outlook === value ? "active" : ""} onClick={() => setOutlook(value)}>{value}</button>)}
