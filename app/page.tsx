@@ -1,11 +1,15 @@
 "use client";
 
+import Image from "next/image";
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
-  Download, Eye, FileSpreadsheet, FileText, Pencil, Share2, SlidersHorizontal, X,
+  Check, Download, FileSpreadsheet, FileText, Pencil, Share2, SlidersHorizontal, X,
 } from "lucide-react";
-import { BASE_RATES, LIFE_EXPECTANCY, calculatePlan, projectScenario } from "@/lib/fire-model";
-import type { Outlook, Recommendation, SimulationResult, YearPoint } from "@/lib/fire-model";
+import { BASE_RATES, LIFE_EXPECTANCY, MODEL_VERSION, projectScenario, simulationRateFrames } from "@/lib/fire-model";
+import type { Outlook, RateKey, Recommendation, SimulationResult, YearPoint } from "@/lib/fire-model";
+import expenditureIcon from "@/public/details-expenditure.svg";
+import incomeIcon from "@/public/details-income.svg";
+import investmentsIcon from "@/public/details-investments.svg";
 
 type Details = {
   age: number; mutualFunds: number; monthlySip: number; stocks: number; fixedDeposits: number; realEstate: number;
@@ -28,6 +32,20 @@ const REAL_ESTATE_RETURN = 0.08;
 const NEW_SAVINGS_RETURN = 0.04;
 const POST_RETIREMENT_RETURN = 0.07;
 const INFLATION = 0.06;
+const OUTLOOKS = ["cautious", "typical", "optimistic"] as const;
+const outlookLabel = (value: Outlook) => value === "typical" ? "Moderate" : value[0].toUpperCase() + value.slice(1);
+const RATE_KEYS: RateKey[] = ["mutualFunds", "stocks", "fixedDeposits", "realEstate", "savings", "inflation"];
+const percentage = (value: number) => `${value < 0 ? "−" : ""}${Math.abs(value * 100).toFixed(1)}%`;
+const LOADING_MESSAGES = [
+  "Exploring different possible futures",
+  "Testing changes in growth and inflation",
+  "Checking how long your money could last",
+  "Finding a retirement age that holds up",
+] as const;
+const RESULT_RATE_LABELS: Record<RateKey, string> = {
+  inflation: "Inflation", mutualFunds: "MF growth", stocks: "Stock growth",
+  fixedDeposits: "FD interest rate", realEstate: "Real estate growth", savings: "Savings growth",
+};
 
 const inr = (value: number, compact = true) => {
   if (compact && value >= 10_000_000) return `₹${(value / 10_000_000).toFixed(1)} cr`;
@@ -149,21 +167,31 @@ function RangeField({ label, value, onChange, min, max, step = 1000, prefix = "�
 
 const INTRO_CASH_BARS = [94,94,105,105,114,114,128,157,173,173,188,188,199,199,211,211,225,225,241,241,251,251,263,263,268,268,274,274,274,274,274,274,263,263,248,248,241,241,231,231,225,225,217,217,211,211,199,199,188,188];
 const INTRO_EXPENSE_BARS = [55,55,62,62,67,67,75,75,84,84,90,90,95,95,102,102,109,109,115,115,120,120,127,127,129,129,132,132,132,132,132,132,127,127,119,119,115,115,112,112,109,109,105,105,102,102,95,95,90,90];
+const INTRO_PROJECTIONS = Array.from({ length: 5 }, (_, layer) => ({
+  cash: INTRO_CASH_BARS.map((height, index) => Math.round(height * (.72 + layer * .075) * (1 + Math.sin(index * .21 + layer * 1.35) * .11))),
+  expenses: INTRO_EXPENSE_BARS.map((height, index) => Math.round(height * (.66 + layer * .085) * (1 + Math.cos(index * .19 + layer) * .13))),
+}));
 function IntroChart() {
-  return <div className="intro-chart" aria-label="Animated example of growing investments and changing expenses">
-    <div className="intro-bars intro-cash" aria-hidden="true">
-      {INTRO_CASH_BARS.map((height, index) => <i key={index} style={{ height, "--intro-delay": `${index * -85}ms` } as React.CSSProperties} />)}
-    </div>
-    <div className="intro-bars intro-expenses" aria-hidden="true">
-      {INTRO_EXPENSE_BARS.map((height, index) => <i key={index} style={{ height, "--intro-delay": `${index * -85}ms` } as React.CSSProperties} />)}
-    </div>
+  return <div className="intro-chart" aria-label="Five animated financial projections">
+    {INTRO_PROJECTIONS.map((projection, layer) => <div className="intro-projection" key={layer} style={{ "--projection-delay": `${layer * -.8}s` } as React.CSSProperties} aria-hidden="true">
+      <div className="intro-bars intro-cash">{projection.cash.map((height, index) => <i key={index} style={{ height }} />)}</div>
+      <div className="intro-bars intro-expenses">{projection.expenses.map((height, index) => <i key={index} style={{ height }} />)}</div>
+    </div>)}
   </div>;
 }
 
-function ProjectionChart({ details, dependents, loan, retirementAge, scenario, selectedAge, onSelect, compact = false, teaser = false, showStatus = true, projectionData, possiblePaths, showOutcomes = false }: {
+function blendProjection(a: YearPoint[], b: YearPoint[], amount: number): YearPoint[] {
+  return a.map((point, index) => {
+    const other = b[index] ?? point;
+    const mix = (from: number, to: number) => from + (to - from) * amount;
+    return { age: point.age, corpus: mix(point.corpus, other.corpus), expense: mix(point.expense, other.expense), requestedExpense: mix(point.requestedExpense, other.requestedExpense) };
+  });
+}
+
+function ProjectionChart({ details, dependents, loan, retirementAge, scenario, selectedAge, onSelect, compact = false, teaser = false, loading = false, showStatus = true, projectionData, possiblePaths, possibleExpensePaths, showOutcomes = false }: {
   details: Details; dependents: Dependents; loan: Loan; retirementAge: number | null; scenario?: Scenario;
-  selectedAge: number | null; onSelect: (age: number | null) => void; compact?: boolean; teaser?: boolean; showStatus?: boolean;
-  projectionData?: YearPoint[]; possiblePaths?: number[][]; showOutcomes?: boolean;
+  selectedAge: number | null; onSelect: (age: number | null) => void; compact?: boolean; teaser?: boolean; loading?: boolean; showStatus?: boolean;
+  projectionData?: YearPoint[]; possiblePaths?: number[][]; possibleExpensePaths?: number[][]; showOutcomes?: boolean;
 }) {
   const fallbackData = useMemo(() => {
     const contribution = scenario
@@ -196,29 +224,31 @@ function ProjectionChart({ details, dependents, loan, retirementAge, scenario, s
     });
   }, [details, dependents, loan, retirementAge, scenario]);
   const data = projectionData?.length ? projectionData : fallbackData;
-  const maxCorpus = Math.max(...data.map((item) => item.corpus), 1);
-  const maxExpense = Math.max(...data.map((item) => item.expense), 1);
-  const plotHeight = compact ? 40 : teaser ? 512 : 358;
+  const outcomeScaleValues = showOutcomes && possiblePaths?.length ? data.map((_, yearIndex) => {
+    const values = possiblePaths.map((path) => Math.max(0, path[yearIndex] ?? 0)).sort((a, b) => a - b);
+    return values[Math.floor((values.length - 1) * .8)] ?? 0;
+  }) : [];
+  const maxCorpus = Math.max(...data.map((item) => item.corpus), ...outcomeScaleValues, 1);
+  const outcomeExpenseScaleValues = showOutcomes && possibleExpensePaths?.length ? data.map((_, yearIndex) => {
+    const values = possibleExpensePaths.map((path) => Math.max(0, path[yearIndex] ?? 0)).sort((a, b) => a - b);
+    return values[Math.floor((values.length - 1) * .8)] ?? 0;
+  }) : [];
+  const maxExpense = Math.max(...data.map((item) => item.expense), ...outcomeExpenseScaleValues, 1);
+  const plotHeight = compact ? 40 : loading ? 344 : teaser ? 512 : showOutcomes ? 387 : 358;
   const pixelsPerRupee = plotHeight / (maxCorpus + maxExpense);
-  const corpusAreaHeight = maxCorpus * pixelsPerRupee;
-  const expenseAreaHeight = maxExpense * pixelsPerRupee;
+  const corpusAreaHeight = loading ? 260 : showOutcomes ? 280 : maxCorpus * pixelsPerRupee;
+  const expenseAreaHeight = loading ? 84 : showOutcomes ? 107 : maxExpense * pixelsPerRupee;
+  const corpusPixelsPerRupee = loading || showOutcomes ? corpusAreaHeight / maxCorpus : pixelsPerRupee;
+  const expensePixelsPerRupee = loading || showOutcomes ? expenseAreaHeight / maxExpense : pixelsPerRupee;
   // Use one rupee-to-pixel scale on both sides of the zero line. Otherwise,
   // similar cash and expense values can look unrelated when each side is
   // independently normalized.
   const tooltipAge = selectedAge ?? (!compact && showStatus ? retirementAge : null);
   const selected = tooltipAge === null ? null : data.find((item) => item.age === tooltipAge) ?? null;
   const firstDepletedAge = data.find((item) => item.corpus <= 0)?.age;
-  const outcomeRanges = useMemo(() => {
-    if (!showOutcomes || !possiblePaths?.length) return null;
-    return data.map((_, yearIndex) => {
-      const values = possiblePaths.map((path) => Math.max(0, path[yearIndex] ?? 0)).sort((a, b) => a - b);
-      const at = (percentile: number) => values[Math.min(values.length - 1, Math.floor((values.length - 1) * percentile))] ?? 0;
-      return { cautious: at(.2), typical: at(.5), optimistic: at(.8) };
-    });
-  }, [data, possiblePaths, showOutcomes]);
 
   return (
-    <div className={`projection-chart ${compact ? "compact" : ""} ${teaser ? "teaser" : ""} ${selected ? "has-selection" : ""} ${showOutcomes ? "outcome-mode" : ""}`}>
+    <div className={`projection-chart ${compact ? "compact" : ""} ${teaser ? "teaser" : ""} ${loading ? "loading-chart" : ""} ${selected ? "has-selection" : ""} ${showOutcomes ? "outcome-mode" : ""}`}>
       {selected && !teaser && (
         <div className="chart-tooltip" role="status">
           <strong>{selected.age}y</strong>
@@ -226,7 +256,7 @@ function ProjectionChart({ details, dependents, loan, retirementAge, scenario, s
           <span>Expenses: <b>{selected.requestedExpense > selected.expense ? "more than cash" : chartMetric(selected.requestedExpense)}</b></span>
         </div>
       )}
-      {!teaser && showStatus && retirementAge === null && <div className="chart-warning"><span>⚠</span> Can’t retire with current information</div>}
+      {!teaser && showStatus && retirementAge === null && !selected && <div className="chart-warning"><span>⚠</span> Can’t retire with current information</div>}
       <div className="bars-area corpus-area" style={{ height: `${corpusAreaHeight}px` }}>
         {data.map((item, yearIndex) => (
           <button
@@ -237,17 +267,15 @@ function ProjectionChart({ details, dependents, loan, retirementAge, scenario, s
             aria-label={`Age ${item.age}: corpus ${inr(item.corpus)}`}
           >
             {item.age === firstDepletedAge && <span className="zero-line" />}
-            {outcomeRanges && <span className="outcome-range" aria-hidden="true">
-              <i className="optimistic" style={{ height: `${Math.min(corpusAreaHeight, outcomeRanges[yearIndex].optimistic * pixelsPerRupee)}px` }} />
-              <i className="typical" style={{ height: `${Math.min(corpusAreaHeight, outcomeRanges[yearIndex].typical * pixelsPerRupee)}px` }} />
-              <i className="cautious" style={{ height: `${Math.min(corpusAreaHeight, outcomeRanges[yearIndex].cautious * pixelsPerRupee)}px` }} />
+            {showOutcomes && possiblePaths && <span className="outcome-path-bars" aria-hidden="true">
+              {possiblePaths.slice(0, 100).map((path, pathIndex) => <i key={pathIndex} style={{ height: `${Math.min(corpusAreaHeight, Math.max(0, path[yearIndex] ?? 0) * corpusPixelsPerRupee)}px` }} />)}
             </span>}
-            <span className={`bar corpus ${showOutcomes ? "active-outlook" : ""}`} style={{ height: `${item.corpus <= 0 ? 0 : Math.max(2, item.corpus * pixelsPerRupee)}px`, "--bar-delay": `${(item.age - details.age) * -90}ms` } as React.CSSProperties} />
+            <span className={`bar corpus ${showOutcomes ? "active-outlook" : ""}`} style={{ height: `${item.corpus <= 0 ? 0 : Math.max(2, item.corpus * corpusPixelsPerRupee)}px`, "--bar-delay": `${(item.age - details.age) * -90}ms` } as React.CSSProperties} />
           </button>
         ))}
       </div>
       <div className="bars-area expense-area" style={{ height: `${expenseAreaHeight}px` }}>
-        {data.map((item) => (
+        {data.map((item, yearIndex) => (
           <button
             key={`expense-${item.age}`}
             className={`bar-slot ${item.age === selectedAge ? "selected" : ""} ${item.corpus <= 0 ? "depleted" : ""}`}
@@ -255,19 +283,15 @@ function ProjectionChart({ details, dependents, loan, retirementAge, scenario, s
             tabIndex={teaser ? -1 : 0}
             aria-label={`Age ${item.age}: spending ${inr(item.expense)}`}
           >
-            <span className={`bar expense ${retirementAge !== null && item.age >= retirementAge ? "after-retirement" : ""}`} style={{ height: `${item.expense <= 0 ? 0 : Math.max(2, item.expense * pixelsPerRupee)}px`, "--bar-delay": `${(item.age - details.age) * -90}ms` } as React.CSSProperties} />
+            {showOutcomes && possibleExpensePaths && <span className="outcome-path-bars expense-paths" aria-hidden="true">
+              {possibleExpensePaths.slice(0, 100).map((path, pathIndex) => <i key={pathIndex} style={{ height: `${Math.min(expenseAreaHeight, Math.max(0, path[yearIndex] ?? 0) * expensePixelsPerRupee)}px` }} />)}
+            </span>}
+            <span className={`bar expense ${retirementAge !== null && item.age >= retirementAge ? "after-retirement" : ""}`} style={{ height: `${item.expense <= 0 ? 0 : Math.max(2, item.expense * expensePixelsPerRupee)}px`, "--bar-delay": `${(item.age - details.age) * -90}ms` } as React.CSSProperties} />
           </button>
         ))}
       </div>
     </div>
   );
-}
-
-function PlannerTabs({ active, onChange }: { active: "estimate" | "details"; onChange: (tab: "estimate" | "details") => void }) {
-  return <nav className="planner-tabs" aria-label="Planner sections">
-    <button className={active === "estimate" ? "active" : ""} onClick={() => onChange("estimate")}>Retirement estimate</button>
-    <button className={active === "details" ? "active" : ""} onClick={() => onChange("details")}>Your details</button>
-  </nav>;
 }
 
 function BottomSheet({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
@@ -282,45 +306,102 @@ function BottomSheet({ title, onClose, children }: { title: string; onClose: () 
   );
 }
 
+function LoadingScreen({ details, dependents, loan, projection }: { details: Details; dependents: Dependents; loan: Loan; projection: SimulationResult | null }) {
+  const [messageIndex, setMessageIndex] = useState(0);
+  const [rateIndex, setRateIndex] = useState(0);
+  const rateFrames = useMemo(() => simulationRateFrames(731942, 12), []);
+  useEffect(() => {
+    const messageTimer = window.setInterval(() => setMessageIndex((index) => (index + 1) % LOADING_MESSAGES.length), 800);
+    const rateTimer = window.setInterval(() => setRateIndex((index) => (index + 1) % rateFrames.length), 240);
+    return () => { window.clearInterval(messageTimer); window.clearInterval(rateTimer); };
+  }, [rateFrames.length]);
+  const rates = rateFrames[rateIndex];
+  const loadingRateKeys: RateKey[] = ["inflation", "mutualFunds", "stocks", "fixedDeposits", "realEstate", "savings"];
+  const loadingPaths = useMemo(() => projection ? [
+    projection.paths.cautious,
+    blendProjection(projection.paths.cautious, projection.paths.typical, .5),
+    projection.paths.typical,
+    blendProjection(projection.paths.typical, projection.paths.optimistic, .5),
+    projection.paths.optimistic,
+  ] : [], [projection]);
+  return <div className="loading-screen" role="status" aria-live="polite">
+    <div className="loading-visual" aria-hidden="true">
+      {(loadingPaths.length ? loadingPaths : [undefined, undefined, undefined, undefined, undefined]).map((path, layer) => <div className="loading-projection" key={layer} style={{ "--projection-delay": `${layer * -.44}s` } as React.CSSProperties}>
+        <ProjectionChart details={details} dependents={dependents} loan={loan} retirementAge={null} selectedAge={null} onSelect={() => undefined}
+          loading showStatus={false} projectionData={path} />
+      </div>)}
+    </div>
+    <section className="loading-copy">
+      <p key={messageIndex}>{LOADING_MESSAGES[messageIndex]}</p>
+      <div className="rate-grid">
+        {loadingRateKeys.map((key) => <span key={key}><small>{RESULT_RATE_LABELS[key]}</small><b>{percentage(rates[key])}</b></span>)}
+      </div>
+    </section>
+  </div>;
+}
+
 export default function Home() {
-  const [screen, setScreen] = useState<"start" | "details" | "result" | "outcomes">("start");
+  const [screen, setScreen] = useState<"start" | "details" | "loading" | "result">("start");
   const [details, setDetails] = useState<Details>(DEFAULTS);
   const [dependents, setDependents] = useState<Dependents>(DEFAULT_DEPENDENTS);
   const [loan, setLoan] = useState<Loan>(DEFAULT_LOAN);
   const [chartExpanded, setChartExpanded] = useState(false);
   const [selectedAge, setSelectedAge] = useState<number | null>(null);
   const [targetAge, setTargetAge] = useState<number | null>(null);
-  const [sheet, setSheet] = useState<"dependents" | "loan" | "share" | "help" | "retirement" | null>(null);
+  const [sheet, setSheet] = useState<"dependents" | "loan" | "share" | "help" | "retirement" | "scenarios" | null>(null);
   const [activeDetailSection, setActiveDetailSection] = useState<"age" | "investments" | "income" | "expenditure" | null>(null);
   const [detailsScrolled, setDetailsScrolled] = useState(false);
   const [previewPlan, setPreviewPlan] = useState<SimulationResult | null>(null);
   const [calculatedPlan, setCalculatedPlan] = useState<SimulationResult | null>(null);
-  const [outlook, setOutlook] = useState<Outlook>("typical");
+  const [outlook, setOutlook] = useState<Outlook>("cautious");
+  const [scenarioView, setScenarioView] = useState<"all" | Outlook>("all");
   const [editingDetails, setEditingDetails] = useState(false);
   const [recommendationsLoading, setRecommendationsLoading] = useState(false);
   const [recommendation, setRecommendation] = useState<Recommendation | null>(null);
+  const [targetProjection, setTargetProjection] = useState<ReturnType<typeof projectScenario> | null>(null);
   const workerRef = useRef<Worker | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const lastScrollTop = useRef(0);
+  const chartCollapseGuard = useRef(false);
+  const chartCollapseTimer = useRef<number | null>(null);
   const sectionNavigationRef = useRef(false);
   const sectionNavigationTimerRef = useRef<number | null>(null);
   const ageSectionRef = useRef<HTMLElement>(null);
   const investmentsSectionRef = useRef<HTMLElement>(null);
   const incomeSectionRef = useRef<HTMLElement>(null);
   const expenditureSectionRef = useRef<HTMLElement>(null);
+  const calculationStartedAtRef = useRef(0);
+  const calculationFinishTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     const worker = new Worker(new URL("./fire.worker.ts", import.meta.url), { type: "module" });
     workerRef.current = worker;
-    worker.onmessage = (event: MessageEvent<{ kind: "plan"; plan: SimulationResult } | { kind: "recommend"; recommendation: Recommendation }>) => {
+    worker.onmessage = (event: MessageEvent<
+      | { kind: "plan"; plan: SimulationResult }
+      | { kind: "calculate"; plan: SimulationResult }
+      | { kind: "recommend"; recommendation: Recommendation; projection: ReturnType<typeof projectScenario> }
+    >) => {
       if (event.data.kind === "plan") setPreviewPlan(event.data.plan);
-      else {
+      else if (event.data.kind === "calculate") {
+        const plan = event.data.plan;
+        const finish = () => {
+          setCalculatedPlan(plan);
+          setSelectedAge(plan.retirementAge ?? plan.paths.cautious[0]?.age ?? 18);
+          setTargetAge(null); setEditingDetails(false); setScreen("result");
+        };
+        const remaining = Math.max(0, 2800 - (performance.now() - calculationStartedAtRef.current));
+        calculationFinishTimerRef.current = window.setTimeout(finish, remaining);
+      } else {
         const rec = event.data.recommendation;
         setRecommendation(rec);
+        setTargetProjection(event.data.projection);
         setRecommendationsLoading(false);
       }
     };
-    return () => worker.terminate();
+    return () => {
+      worker.terminate();
+      if (calculationFinishTimerRef.current) window.clearTimeout(calculationFinishTimerRef.current);
+    };
   }, []);
   useEffect(() => {
     const timer = window.setTimeout(() => workerRef.current?.postMessage({ kind: "plan", details, dependents, loan }), 80);
@@ -333,14 +414,27 @@ export default function Home() {
   }, [sheet, targetAge, details, dependents, loan]);
 
   const estimatedAge = calculatedPlan?.retirementAge ?? null;
-  const recoveryMode = calculatedPlan !== null && estimatedAge === null && targetAge === null;
+  const recoveryMode = calculatedPlan !== null && estimatedAge === null;
   const activeRetirementAge = targetAge ?? estimatedAge ?? details.age;
   const cannotRetire = recoveryMode;
   const alreadyRetired = details.monthlyIncome === 0;
   const showingCurrentRetirement = alreadyRetired && targetAge === null;
+  const guardChartCollapse = () => {
+    chartCollapseGuard.current = true;
+    if (chartCollapseTimer.current) window.clearTimeout(chartCollapseTimer.current);
+    chartCollapseTimer.current = window.setTimeout(() => { chartCollapseGuard.current = false; }, 350);
+  };
   const collapseChart = () => {
-    if (chartExpanded) setChartExpanded(false);
+    if (chartExpanded) {
+      guardChartCollapse();
+      setChartExpanded(false);
+    }
     setSelectedAge(null);
+  };
+  const calculateRetirementAge = () => {
+    calculationStartedAtRef.current = performance.now();
+    setScreen("loading");
+    workerRef.current?.postMessage({ kind: "calculate", details, dependents, loan });
   };
   const detailSections = [
     ["age", ageSectionRef], ["investments", investmentsSectionRef],
@@ -372,6 +466,7 @@ export default function Home() {
       ["summary", "current_age", details.age], ["summary", "retirement_age", targetAge ?? estimatedAge ?? "undetermined"],
       ["summary", "success_probability", projection?.successRate ?? 0], ["summary", "simulation_count", 1000],
       ["summary", "projection_outlook", outlook], ["summary", "simulation_seed", projection?.seed ?? 731942],
+      ["summary", "model_version", MODEL_VERSION],
       ["input", "mutual_funds", hypotheticalDetails.mutualFunds], ["input", "monthly_mutual_fund_sip", hypotheticalDetails.monthlySip],
       ["input", "stocks", hypotheticalDetails.stocks], ["input", "fixed_deposits", hypotheticalDetails.fixedDeposits],
       ["input", "real_estate", hypotheticalDetails.realEstate], ["input", "bank_savings", hypotheticalDetails.bankSavings],
@@ -382,7 +477,16 @@ export default function Home() {
       ["alternative", "required_monthly_sip", recommendation?.monthlySip ?? "not_possible_alone"],
       ["alternative", "required_monthly_income", recommendation?.monthlyIncome ?? "not_possible_alone"],
       ["alternative", "maximum_monthly_expenditure", recommendation?.monthlyExpense ?? "not_possible_alone"],
+      ["alternative", "required_current_corpus", recommendation?.requiredCurrentCorpus ?? "not_calculated"],
       ...Object.entries(BASE_RATES).map(([key, value]) => ["rate", key, value] as (string | number)[]),
+      ...RATE_KEYS.flatMap((key) => {
+        const summary = projection?.rateSummaries[outlook]?.[key];
+        return summary ? [
+          ["displayed_path_rate", `${key}_average`, summary.average],
+          ["displayed_path_rate", `${key}_minimum`, summary.min],
+          ["displayed_path_rate", `${key}_maximum`, summary.max],
+        ] : [];
+      }),
       ["projection", "age", "cash_at_hand", "requested_expenses", "funded_expenses"],
       ...((projection?.paths[outlook] ?? []).map((point) => ["projection", point.age, Math.round(point.corpus), Math.round(point.requestedExpense), Math.round(point.expense)])),
     ];
@@ -406,10 +510,9 @@ export default function Home() {
               <IntroChart />
             </div>
             <section className="start-copy">
-              <h1>When could work become<br />optional?</h1>
-              <p>See how your investments grow, how your expenses change, and what you can do to retire earlier</p>
+              <h1>When can you retire?</h1>
+              <p>See your finances run across multiple scenarios to determine the best age to retire</p>
               <button className="primary-button" onClick={() => setScreen("details")}>Find my retirement age</button>
-              <button className="text-link" onClick={() => setSheet("help")}>What’s this?</button>
             </section>
           </div>
         )}
@@ -423,9 +526,10 @@ export default function Home() {
             }
             setDetailsScrolled(nextTop > 4);
             if (nextTop > lastScrollTop.current + 3) {
+              if (chartExpanded) guardChartCollapse();
               setChartExpanded(false);
               setSelectedAge(null);
-            } else if (nextTop < lastScrollTop.current - 3 && nextTop <= 12 && !sectionNavigationRef.current) {
+            } else if (nextTop < lastScrollTop.current - 3 && nextTop <= 12 && !chartCollapseGuard.current && !sectionNavigationRef.current) {
               // Expanding the sticky chart while deep in the form changes its
               // height by 262px and makes the content jump beneath it. Restore
               // the expanded state only once the user has returned to the top.
@@ -449,30 +553,31 @@ export default function Home() {
             >
               <ProjectionChart details={details} dependents={dependents} loan={loan} retirementAge={null} selectedAge={null} onSelect={() => undefined} compact={!chartExpanded} showStatus={false} projectionData={previewPlan?.paths.typical} />
             </div>
-            {chartExpanded && <PlannerTabs active="details" onChange={(tab) => { if (tab === "estimate") setScreen("result"); }} />}
             <div className="input-content">
               <h1>{editingDetails ? "Edit your details" : "Enter your details"}</h1>
               <nav className={`detail-jump-nav ${detailsScrolled ? "scrolled" : ""}`} style={{ top: chartExpanded ? 375 : 89 }} aria-label="Detail sections">
                 {(["age", "investments", "income", "expenditure"] as const).map((section) => <button key={section} className={activeDetailSection === section ? "active" : ""} onClick={() => scrollToDetailSection(section)}>{section}</button>)}
+                <button onClick={() => setSheet("loan")}>loans</button>
+                <button onClick={() => setSheet("dependents")}>dependencies</button>
               </nav>
               <section className="detail-group age-group" ref={ageSectionRef}>
                 <RangeField label="Current age" value={details.age} min={20} max={60} step={1} prefix="" onInteract={collapseChart} onChange={(value) => setDetails({ ...details, age: value })} />
               </section>
               <section className="detail-group" ref={investmentsSectionRef}>
-                <h2><span>Investments</span></h2>
+                <h2><Image src={investmentsIcon} alt="" /><span>Investments</span></h2>
                 <RangeField label="Mutual Funds" value={details.mutualFunds} min={0} max={20_000_000} step={50_000} prefix="" onInteract={collapseChart} onChange={(value) => setDetails({ ...details, mutualFunds: value })} />
-                <RangeField label="Monthly SIPs in Mutual Funds" value={details.monthlySip} min={0} max={500_000} step={5_000} prefix="" onInteract={collapseChart} onChange={(value) => setDetails({ ...details, monthlySip: value })} />
+                <RangeField label="Monthly SIPs in MF" value={details.monthlySip} min={0} max={500_000} step={5_000} prefix="" onInteract={collapseChart} onChange={(value) => setDetails({ ...details, monthlySip: value })} />
                 <RangeField label="Stocks" value={details.stocks} min={0} max={20_000_000} step={50_000} prefix="" onInteract={collapseChart} onChange={(value) => setDetails({ ...details, stocks: value })} />
                 <RangeField label="FD" value={details.fixedDeposits} min={0} max={10_000_000} step={50_000} prefix="" onInteract={collapseChart} onChange={(value) => setDetails({ ...details, fixedDeposits: value })} />
                 <RangeField label="Real Estate" value={details.realEstate} min={0} max={50_000_000} step={100_000} prefix="" onInteract={collapseChart} onChange={(value) => setDetails({ ...details, realEstate: value })} />
               </section>
               <section className="detail-group" ref={incomeSectionRef}>
-                <h2><span>Income</span></h2>
+                <h2><Image src={incomeIcon} alt="" /><span>Income</span></h2>
                 <RangeField label="Monthly income" value={details.monthlyIncome} min={0} max={500_000} step={5_000} prefix="" onInteract={collapseChart} onChange={(value) => setDetails({ ...details, monthlyIncome: value })} />
                 <RangeField label="Bank savings" value={details.bankSavings} min={0} max={10_000_000} step={50_000} prefix="" onInteract={collapseChart} onChange={(value) => setDetails({ ...details, bankSavings: value })} />
               </section>
               <section className="detail-group" ref={expenditureSectionRef}>
-                <h2><span>Expenditure</span></h2>
+                <h2><Image src={expenditureIcon} alt="" /><span>Expenditure</span></h2>
                 <RangeField label="Monthly expenditure" value={details.monthlyExpense} min={10_000} max={300_000} step={5_000} prefix="" onInteract={collapseChart} onChange={(value) => setDetails({ ...details, monthlyExpense: value })} />
               </section>
               <div className={`add-links ${dependents.count || loan.balance || loan.emi ? "has-summaries" : ""}`}>
@@ -480,96 +585,104 @@ export default function Home() {
                 {loan.balance || loan.emi ? <button className="detail-summary-card" onClick={() => setSheet("loan")}><span>Loans</span><b>{loan.balance.toLocaleString("en-IN")}</b><Pencil size={20} /></button> : <button onClick={() => setSheet("loan")}>Add Loans</button>}
               </div>
             </div>
-            <div className="sticky-footer"><button className="primary-button" onClick={() => {
-              const result = calculatePlan(details, dependents, loan);
-              setCalculatedPlan(result);
-              setScreen("result");
-              setSelectedAge(result.retirementAge); setTargetAge(null); setEditingDetails(false);
-            }}>{editingDetails ? "Update my retirement age" : "Find my retirement age"}</button></div>
+            <div className="sticky-footer"><button className="primary-button" onClick={calculateRetirementAge}>{editingDetails ? "Update my retirement age" : "Find my retirement age"}</button></div>
           </div>
         )}
 
+        {screen === "loading" && <LoadingScreen details={details} dependents={dependents} loan={loan} projection={previewPlan} />}
+
         {screen === "result" && (
           <div className="result-screen">
-            <ProjectionChart details={details} dependents={dependents} loan={loan} retirementAge={estimatedAge} selectedAge={selectedAge} onSelect={setSelectedAge}
-              projectionData={calculatedPlan?.paths[outlook]} />
+            <ProjectionChart details={details} dependents={dependents} loan={loan} retirementAge={sheet === "retirement" && targetAge !== null ? targetAge : estimatedAge} selectedAge={selectedAge} onSelect={setSelectedAge}
+              projectionData={sheet === "retirement" && targetAge !== null ? targetProjection?.paths[outlook] : calculatedPlan?.paths[outlook]} />
             <section className="result-content">
-              {!cannotRetire ? <button className="result-summary-card" onClick={() => {
-                setRecommendationsLoading(true); setTargetAge(details.age);
+              {!cannotRetire ? <section className="retirement-result">
+                <h1>{showingCurrentRetirement ? "You are already retired" : "Retirement age"}</h1>
+                <strong>{estimatedAge ?? details.age}</strong>
+                <p>In {Math.round((calculatedPlan?.successRate ?? 0) * 100)} of 100 scenarios you can retire by this age</p>
+                <button onClick={() => {
+                setRecommendationsLoading(true); setTargetProjection(null); setTargetAge(estimatedAge ?? details.age); setSelectedAge(estimatedAge ?? details.age);
                 setSheet("retirement");
-              }}>
-                <span><b>{showingCurrentRetirement ? "You are already retired" : "Your retirement age"}</b><small><SlidersHorizontal size={18} />Change</small></span>
-                <strong>{activeRetirementAge}</strong>
-              </button> : <button className="unable-card" onClick={() => {
-                const age = Math.min(Math.max(details.age, 35), 70);
-                setRecommendationsLoading(true); setTargetAge(age);
-                setSheet("retirement");
-              }}>
-                <b>Unable to determine retirement age</b>
-                <span>You can still set an age you want to retire and determine what needs to change</span>
-                <small><SlidersHorizontal size={18} />Set retirement age</small>
-              </button>}
+              }}><SlidersHorizontal size={20} />Change age</button>
+              </section> : <section className="unable-result">
+                <h1>Retirement age is beyond reach</h1>
+                <p>Fret not! tell when you need to retire and let’s figure out how to get there</p>
+                <button onClick={() => {
+                  const age = Math.min(Math.max(details.age, 35), 70);
+                  setRecommendationsLoading(true); setTargetProjection(null); setTargetAge(age); setSelectedAge(age);
+                  setSheet("retirement");
+                }}><SlidersHorizontal size={20} />Set retirement age</button>
+              </section>}
               <section className="outlook-section">
-                <h2>Projection outlook</h2>
-                {calculatedPlan && <div className="success-copy"><b>{Math.round(calculatedPlan.successRate * 100)} out of 100</b><span>possible futures last through age 90</span></div>}
+                <h2>Your finances in different scenarios</h2>
                 <div className="outlook-options">
-                  {(["cautious", "typical", "optimistic"] as const).map((value) => <button key={value} className={outlook === value ? "active" : ""} onClick={() => setOutlook(value)}>{value}</button>)}
+                  {OUTLOOKS.map((value) => <button key={value} className={outlook === value ? "active" : ""} onClick={() => setOutlook(value)}>{outlook === value && <Check size={18} />}{outlookLabel(value)}</button>)}
                 </div>
-                <p>{outlook === "cautious" ? "A weaker outcome from the same possible futures" : outlook === "optimistic" ? "A stronger outcome from the same possible futures" : "The middle outcome across possible futures"}</p>
-                <button className="outcomes-link" onClick={() => setScreen("outcomes")}><Eye size={19} />See possible outcomes</button>
+                <div className="rate-grid result-rates">
+                  {(["inflation", "mutualFunds", "stocks", "fixedDeposits", "realEstate", "savings"] as RateKey[]).map((key) => <span key={key}>
+                    <small>{RESULT_RATE_LABELS[key]}</small>
+                    <b>{percentage(calculatedPlan?.rateSummaries[outlook][key].average ?? BASE_RATES[key])}</b>
+                  </span>)}
+                </div>
+                <button className="outcomes-link" onClick={() => { setScenarioView("all"); setSheet("scenarios"); }}><SlidersHorizontal size={20} />More details</button>
               </section>
             </section>
             <nav className="bottom-nav" aria-label="Plan actions">
-              <button className="share-main" onClick={() => { setEditingDetails(true); setChartExpanded(false); setScreen("details"); }}><Pencil size={20} />Edit details</button>
+              <button className="share-main" onClick={() => { setEditingDetails(true); setChartExpanded(false); setScreen("details"); }}>Edit details</button>
               <button className="export-main primary-button" onClick={exportCsv}>Export</button>
             </nav>
           </div>
         )}
 
-        {screen === "outcomes" && (
-          <div className="outcomes-screen">
-            <header><button onClick={() => setScreen("result")} aria-label="Back to plan">‹</button><div><h1>Possible outcomes</h1><p>Explore how the same plan may unfold</p></div></header>
-            <ProjectionChart details={details} dependents={dependents} loan={loan} retirementAge={estimatedAge} selectedAge={selectedAge} onSelect={setSelectedAge}
-              projectionData={calculatedPlan?.paths[outlook]} possiblePaths={calculatedPlan?.samples} showOutcomes />
-            <section className="outcomes-content">
-              <p>The overlapping projections show cautious, typical and optimistic outcomes from the same 1,000 possible futures.</p>
-              <h2>View this projection as</h2>
-              <div className="outlook-options">
-                {(["cautious", "typical", "optimistic"] as const).map((value) => <button key={value} className={outlook === value ? "active" : ""} onClick={() => setOutlook(value)}>{value}</button>)}
-              </div>
-              <p className="outlook-description">{outlook === "cautious" ? "A weaker outcome from the same possible futures" : outlook === "optimistic" ? "A stronger outcome from the same possible futures" : "The middle outcome across possible futures"}</p>
-              <div className="outcome-note"><b>How your age is calculated</b><p>We test 1,000 possible futures. Your retirement age must last until 90 in at least 85 out of 100 of them.</p></div>
-            </section>
-            <div className="sticky-footer"><button className="primary-button" onClick={() => setScreen("result")}>Back to my plan</button></div>
-          </div>
-        )}
-
-        {sheet === "retirement" && targetAge !== null && <BottomSheet title={estimatedAge === null ? "Set retirement age" : "Change retirement age"} onClose={() => { setSheet(null); setTargetAge(null); }}>
-          {estimatedAge !== null && <p className="calculated-age-copy">Retirement age calculated: {estimatedAge}</p>}
+        {sheet === "retirement" && targetAge !== null && <BottomSheet title={estimatedAge === null ? "Set retirement age" : "Change retirement age"} onClose={() => { setSheet(null); setTargetAge(null); setTargetProjection(null); setSelectedAge(estimatedAge ?? details.age); }}>
+          {estimatedAge !== null && <p className="calculated-age-copy">{outlookLabel(outlook).toLowerCase()} scenario · calculated age: {estimatedAge}</p>}
           <RangeField label="What if I retire by…" value={targetAge} min={details.age} max={LIFE_EXPECTANCY - 1} step={1} prefix="" onChange={(age) => {
-            setRecommendationsLoading(true); setTargetAge(age);
+            setRecommendationsLoading(true); setTargetProjection(null); setTargetAge(age); setSelectedAge(age);
           }} />
-          <h3 className="changes-heading">You need to bring in one of these changes</h3>
+          <h3 className="changes-heading">You need to bring in these changes</h3>
           <div className={`change-alternatives ${recommendationsLoading ? "loading" : ""}`}>
-            {[
-              ["Monthly SIPs", recommendation?.monthlySip, details.monthlySip],
-              ["Salary", recommendation?.monthlyIncome, details.monthlyIncome],
-              ["Expenditure", recommendation?.monthlyExpense, details.monthlyExpense],
-            ].map(([label, value, current], index) => {
-              if (value === null || value === undefined) return <div className="change-row unavailable" key={String(label)}>
-                {index > 0 && <i>or</i>}<span><small>{label}</small><b>Not enough on its own</b></span>
-              </div>;
-              const difference = Number(value) - Number(current);
-              const percent = Number(current) > 0 ? Math.round(Math.abs(difference) / Number(current) * 100) : 100;
-              return <div className="change-row" key={String(label)}>
-                {index > 0 && <i>or</i>}
-                <span><small>{label}</small><b>{inr(Number(value), false)}</b></span>
-                <em className={difference <= 0 && label === "Expenditure" ? "expense-change" : ""}>{difference >= 0 ? "+" : "−"}{percent}%</em>
-              </div>;
-            })}
+            {(() => {
+              const suggestions = [
+                recommendation?.monthlySip == null ? null : { label: "Increase monthly SIPs to", value: recommendation.monthlySip, current: details.monthlySip },
+                recommendation?.monthlyExpense == null ? null : { label: "Decrease monthly expenditure to", value: recommendation.monthlyExpense, current: details.monthlyExpense },
+                recommendation?.monthlyIncome == null ? null : { label: "Increase monthly salary to", value: recommendation.monthlyIncome, current: details.monthlyIncome },
+              ].filter((item): item is { label: string; value: number; current: number } => item !== null);
+              const currentCorpus = details.bankSavings + details.fixedDeposits + details.mutualFunds + details.stocks + details.realEstate;
+              if (!suggestions.length && recommendation) suggestions.push({ label: "Increase current investments to", value: recommendation.requiredCurrentCorpus, current: currentCorpus });
+              return suggestions.map((item, index) => <div className="change-suggestion" key={item.label}>
+                {index > 0 && <div className="or-divider"><span>or</span><i /></div>}
+                <p>{item.label}</p>
+                <strong>{inr(item.value, false)} <small>current: {inr(item.current, false).replace("₹", "")}</small></strong>
+              </div>);
+            })()}
           </div>
           <button className="secondary-action sheet-action" onClick={exportCsv}><Download size={20} />Download plan</button>
         </BottomSheet>}
+
+        {sheet === "scenarios" && <div className="sheet-backdrop scenario-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) setSheet(null); }}>
+          <section className="scenario-sheet" role="dialog" aria-modal="true" aria-label="Scenario simulations">
+            <div className="sheet-handle" />
+            <h2>Scenario simulations</h2>
+            <p>Your finance details are run through multiple possible market scenarios to see how they hold up till you turn 90</p>
+            <div className="scenario-chart">
+              <ProjectionChart details={details} dependents={dependents} loan={loan} retirementAge={estimatedAge} selectedAge={null} onSelect={() => undefined}
+                projectionData={calculatedPlan?.paths[scenarioView === "all" ? "typical" : scenarioView]} possiblePaths={calculatedPlan?.samples}
+                possibleExpensePaths={calculatedPlan?.expenseSamples} showOutcomes={scenarioView === "all"} showStatus={false} />
+            </div>
+            <div className="scenario-options">
+              {(["all", "cautious", "typical", "optimistic"] as const).map((value) => <button key={value} className={scenarioView === value ? "active" : ""} onClick={() => setScenarioView(value)}>{scenarioView === value && <Check size={18} />}{value === "all" ? "All" : outlookLabel(value)}</button>)}
+            </div>
+            <div className="rate-grid scenario-rate-grid">
+              {(["inflation", "mutualFunds", "stocks", "fixedDeposits", "realEstate", "savings"] as RateKey[]).map((key) => {
+                const value = scenarioView === "all" ? BASE_RATES[key] : calculatedPlan?.rateSummaries[scenarioView][key].average ?? BASE_RATES[key];
+                return <span key={key}><small>{RESULT_RATE_LABELS[key]}</small><b>{percentage(value)}</b></span>;
+              })}
+            </div>
+            <p className="monte-carlo-copy">These scenarios are a simplified form of Monte Carlo simulations</p>
+            <button className="know-more" type="button">Know more</button>
+            <button className="secondary-action scenario-done" onClick={() => setSheet(null)}>Got it</button>
+          </section>
+        </div>}
 
         {sheet === "dependents" && <BottomSheet title="Add dependents" onClose={() => setSheet(null)}>
           <RangeField label="Number of dependents" value={dependents.count} min={0} max={8} step={1} prefix="" onChange={(value) => setDependents({ ...dependents, count: value })} />

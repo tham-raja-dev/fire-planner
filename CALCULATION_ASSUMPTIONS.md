@@ -76,10 +76,10 @@ The app simulates every year rather than using a fixed 25× expense shortcut. A 
 
 ## Rate research and simulation outlook
 
-The current release will not expose custom rate editing. It will generate one set of simulated outcomes from the documented model assumptions and let the user change only the projection outlook:
+The current release does not expose custom rate editing. It generates one deterministic set of simulated outcomes from the documented model assumptions and lets the user change only the projection outlook:
 
 - **Cautious:** the 20th-percentile projection.
-- **Typical:** the median (50th-percentile) projection.
+- **Moderate:** the median (50th-percentile) projection. The internal code key remains `typical` for compatibility.
 - **Optimistic:** the 80th-percentile projection.
 
 The outlook is a viewing lens over the same simulation results; it is not an investment-risk questionnaire and does not change the underlying input assumptions.
@@ -109,20 +109,65 @@ These bounds remain internal research references for constructing and validating
 
 ### Implemented simulation model
 
-- The client generates **1,000 deterministic, seeded futures** in a Web Worker. Moving a slider does not regenerate unrelated randomness.
+- The client generates **1,000 deterministic, seeded futures** in a Web Worker. The model seed is `731942` and its version is `2026-09-mc-v3`.
+- Moving a slider recalculates the futures against the changed input, but the fixed seed preserves the same random sequence so unrelated market noise does not change.
 - The model uses annual nominal returns centred on the documented rates: inflation 6%, savings 4%, mutual funds 10%, stocks 10%, fixed deposits 6%, and real estate 8%.
+- A new return is drawn for every asset in every projected year. A scenario does not apply one randomly chosen rate repeatedly for its entire duration.
 - Equity mutual funds and stocks share a market factor so their returns are correlated rather than independently random. Each also has its own idiosyncratic variation.
 - Real estate has a smaller exposure to the same market factor plus independent variation. Inflation, savings, and fixed-deposit variations are generated separately.
 - Annual values are bounded to prevent impossible mathematical tails while retaining negative equity and property years.
 - The same seed and model version must produce the same result. The CSV includes the seed, inputs, rates, success probability, selected outlook, recommendations, and annual chart values.
+- These are synthetic Monte Carlo scenarios generated from normal distributions and correlations. The current implementation does **not** replay or bootstrap historical market-return sequences; user-facing copy must not imply otherwise.
 - Simulations are educational scenario analysis, not forecasts or financial advice.
+
+#### Annual return distributions
+
+All standard deviations below are percentage points. Each draw is clamped to the stated annual range.
+
+| Rate | Annual draw | Clamp |
+| --- | --- | --- |
+| Inflation | 6% + Normal(0, 1.8) | 1% to 12% |
+| Savings/new savings | 4% + Normal(0, 0.6) | 0% to 8% |
+| Mutual funds | 10% + shared market × 12 + independent × 8 | −42% to 45% |
+| Stocks | 10% + shared market × 15 + independent × 11 | −52% to 55% |
+| Fixed deposits | 6% + Normal(0, 0.9) | 2% to 10% |
+| Real estate | 8% + shared market × 4 + independent × 7.5 | −18% to 30% |
+
+The combined, unclamped annual standard deviations are approximately 14.4 percentage points for mutual funds, 18.6 for stocks, and 8.5 for real estate.
+
+### How retirement age is calculated
+
+- For each candidate retirement age, the app runs all 1,000 futures and checks whether every annual expense can be funded through age 90.
+- The recommended retirement age is the earliest candidate age that succeeds in at least **85%** of those futures.
+- Cautious, Moderate, and Optimistic are display lenses only. Switching between them does not recalculate or change the recommended retirement age.
+- The visible representative graph is not used as the retirement-age test; the full distribution of 1,000 outcomes is used.
+
+### Outlook-path construction
+
+- Each displayed outlook is one complete simulated future from the current age through age 90. Points from different futures are never combined into one displayed path.
+- Complete futures are ranked from weaker to stronger using, in order: the age of the first unfunded expense, total corpus maintained across all projected years, corpus remaining at age 90, and original simulation index as a deterministic tie-breaker.
+- A future that never has an unfunded expense is assigned a depletion age after 90, so it ranks above futures that deplete during the plan.
+- Cautious, Moderate, and Optimistic select the complete future nearest the 20th, 50th, and 80th percentile of that ranking.
+- Because these are coherent market paths, their values can cross in an individual year. The labels describe the strength of the complete lifetime outcome, not a guarantee that one path is higher at every age.
 
 ### Possible-outcomes explanation
 
-- The standard chart shows the projection selected by the outlook control, with **Typical** intended as the default.
-- **See possible outcomes** opens a dedicated page containing the projection, plain-language explanation, and controls for switching between Cautious, Typical, and Optimistic outlooks.
-- The explanation visualization overlays a representative sample of approximately 100 low-opacity paths while calculations continue to use all 1,000 simulated paths.
-- The selected outlook path remains visually prominent above the faint paths.
+- The standard chart shows the projection selected by the outlook control, with **Cautious** as the default.
+- **More details** opens the Scenario simulations popover containing the projection, plain-language explanation, and controls for All, Cautious, Moderate, and Optimistic.
+- The All visualization overlays exactly 100 deterministically sampled corpus paths and their corresponding 100 expense paths. Calculations continue to use all 1,000 simulated futures.
+- Individual outlook views show the selected coherent representative future.
+- Final results show the realized annual average for each of the six rates along the selected coherent representative path.
+- The Scenario simulations All view shows the six central modelling assumptions; individual outlooks show their coherent path's realized annual averages.
+- Full minimum and maximum realized rates remain available in the exported CSV rather than expanding the compact results UI.
+- CSV exports include the selected representative path's average, minimum, and maximum realized rate for each asset and inflation.
+
+### Calculation loading state
+
+- Selecting **Find my retirement age** or **Update my retirement age** runs the final 1,000-future calculation in the Web Worker rather than blocking the interface.
+- The loading state remains visible for at least 2.8 seconds so its progress feedback does not flash.
+- Its faded chart uses the user's current preview projection and animates faster than the intro chart.
+- Four annotated progress messages rotate every 800ms.
+- Inflation, savings, mutual-fund, stock, fixed-deposit, and real-estate values rotate every 240ms through deterministic annual draws generated by the same seeded distributions used by the simulation.
 - Supporting copy explains that every faint projection is one possible future and denser areas represent outcomes that occurred more frequently.
 - Custom assumptions and custom return-rate controls are out of scope for the current release.
 
@@ -135,5 +180,6 @@ Calculate three transparent, independent alternatives for the retirement age sel
 1. **Monthly SIP alternative:** binary-search the minimum monthly SIP that makes the corpus last through age 90.
 2. **Salary alternative:** calculate the minimum monthly salary required to cover expenditure, active dependent costs, loan EMI, and that required SIP.
 3. **Expenditure alternative:** binary-search the maximum monthly expenditure that remains sustainable using the user's current income and SIP.
+4. **Current-corpus fallback:** when none of the three monthly levers can independently achieve the selected age, binary-search the additional corpus required today. The additional amount is placed in the savings bucket and therefore uses the conservative **4% annual savings growth rate**.
 
-Each row shows the resulting rupee value and percentage change from the user's current value. The UI labels them as alternatives (“or”), because applying all three changes simultaneously would double-count the improvement.
+Only independently achievable suggestions are shown. They use the sentence-style layout and are separated by “or,” because applying multiple suggestions simultaneously would double-count the improvement. The current-corpus fallback guarantees that the user receives an actionable path even when salary, SIP, or expenditure cannot solve the target alone.

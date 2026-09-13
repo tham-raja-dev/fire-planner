@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title">
+  <title id="title">Expenditure</title>
+  <rect x="8" y="22" width="24" height="94" rx="12" fill="#FF625F"/>
+  <rect x="40" y="46" width="24" height="70" rx="12" fill="#FF625F"/>
+  <rect x="72" y="72" width="24" height="44" rx="12" fill="#FF625F"/>
+  <circle cx="112" cy="104" r="12" fill="#FF625F"/>
+</svg>

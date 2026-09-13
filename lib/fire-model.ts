@@ -1,7 +1,7 @@
 export const LIFE_EXPECTANCY = 90;
 export const SIMULATION_COUNT = 1000;
 export const SUCCESS_THRESHOLD = 0.85;
-export const MODEL_VERSION = "2026-09-mc-v1";
+export const MODEL_VERSION = "2026-09-mc-v3";
 
 export type Details = {
   age: number; mutualFunds: number; monthlySip: number; stocks: number;
@@ -12,16 +12,27 @@ export type Dependents = { count: number; annualCostPerDependent: number; suppor
 export type Loan = { balance: number; emi: number; remainingYears: number };
 export type Outlook = "cautious" | "typical" | "optimistic";
 export type YearPoint = { age: number; corpus: number; expense: number; requestedExpense: number };
-export type Recommendation = { monthlySip: number | null; monthlyIncome: number | null; monthlyExpense: number | null };
+export type RateKey = "inflation" | "savings" | "mutualFunds" | "stocks" | "fixedDeposits" | "realEstate";
+export type RateSummary = Record<RateKey, { average: number; min: number; max: number }>;
+export type Recommendation = {
+  monthlySip: number | null; monthlyIncome: number | null; monthlyExpense: number | null;
+  requiredCurrentCorpus: number;
+};
 export type SimulationResult = {
   retirementAge: number | null; successRate: number;
-  paths: Record<Outlook, YearPoint[]>; samples: number[][]; seed: number;
+  paths: Record<Outlook, YearPoint[]>; rateSummaries: Record<Outlook, RateSummary>;
+  samples: number[][]; expenseSamples: number[][]; seed: number;
 };
 
 export const BASE_RATES = {
   inflation: 0.06, savings: 0.04, mutualFunds: 0.10,
   stocks: 0.10, fixedDeposits: 0.06, realEstate: 0.08,
 } as const;
+export const SIMULATION_RATE_BOUNDS: Record<RateKey, { min: number; max: number }> = {
+  inflation: { min: 0.01, max: 0.12 }, savings: { min: 0, max: 0.08 },
+  mutualFunds: { min: -0.42, max: 0.45 }, stocks: { min: -0.52, max: 0.55 },
+  fixedDeposits: { min: 0.02, max: 0.10 }, realEstate: { min: -0.18, max: 0.30 },
+};
 
 type Shocks = { inflation: number; savings: number; mutualFunds: number; stocks: number; fixedDeposits: number; realEstate: number };
 type Buckets = { savings: number; fixedDeposits: number; mutualFunds: number; stocks: number; realEstate: number };
@@ -47,15 +58,19 @@ function scenarioMatrix(seed: number, count = SIMULATION_COUNT): Shocks[][] {
       const market = normal(random);
       const inflationShock = normal(random);
       return {
-        inflation: clamp(BASE_RATES.inflation + inflationShock * 0.018, 0.01, 0.12),
-        savings: clamp(BASE_RATES.savings + normal(random) * 0.006, 0, 0.08),
-        mutualFunds: clamp(BASE_RATES.mutualFunds + market * 0.12 + normal(random) * 0.08, -0.42, 0.45),
-        stocks: clamp(BASE_RATES.stocks + market * 0.15 + normal(random) * 0.11, -0.52, 0.55),
-        fixedDeposits: clamp(BASE_RATES.fixedDeposits + normal(random) * 0.009, 0.02, 0.10),
-        realEstate: clamp(BASE_RATES.realEstate + market * 0.04 + normal(random) * 0.075, -0.18, 0.30),
+        inflation: clamp(BASE_RATES.inflation + inflationShock * 0.018, SIMULATION_RATE_BOUNDS.inflation.min, SIMULATION_RATE_BOUNDS.inflation.max),
+        savings: clamp(BASE_RATES.savings + normal(random) * 0.006, SIMULATION_RATE_BOUNDS.savings.min, SIMULATION_RATE_BOUNDS.savings.max),
+        mutualFunds: clamp(BASE_RATES.mutualFunds + market * 0.12 + normal(random) * 0.08, SIMULATION_RATE_BOUNDS.mutualFunds.min, SIMULATION_RATE_BOUNDS.mutualFunds.max),
+        stocks: clamp(BASE_RATES.stocks + market * 0.15 + normal(random) * 0.11, SIMULATION_RATE_BOUNDS.stocks.min, SIMULATION_RATE_BOUNDS.stocks.max),
+        fixedDeposits: clamp(BASE_RATES.fixedDeposits + normal(random) * 0.009, SIMULATION_RATE_BOUNDS.fixedDeposits.min, SIMULATION_RATE_BOUNDS.fixedDeposits.max),
+        realEstate: clamp(BASE_RATES.realEstate + market * 0.04 + normal(random) * 0.075, SIMULATION_RATE_BOUNDS.realEstate.min, SIMULATION_RATE_BOUNDS.realEstate.max),
       };
     }),
   );
+}
+
+export function simulationRateFrames(seed = 731942, count = 12): Record<RateKey, number>[] {
+  return scenarioMatrix(seed, 1)[0].slice(0, count);
 }
 
 const dependentMonthlyCost = (dependents: Dependents) => dependents.count * dependents.annualCostPerDependent / 12;
@@ -119,13 +134,42 @@ function successAt(details: Details, dependents: Dependents, loan: Loan, retirem
 }
 
 const percentileIndex: Record<Outlook, number> = { cautious: 0.20, typical: 0.50, optimistic: 0.80 };
-function percentilePaths(runs: ReturnType<typeof runPath>[]): Record<Outlook, YearPoint[]> {
-  const ages = runs[0].points.map((point) => point.age);
-  const build = (outlook: Outlook) => ages.map((age, year) => {
-    const ordered = [...runs].sort((a, b) => a.points[year].corpus - b.points[year].corpus);
-    return ordered[Math.floor((ordered.length - 1) * percentileIndex[outlook])].points[year];
-  });
+function representativeRunIndices(runs: ReturnType<typeof runPath>[]): Record<Outlook, number> {
+  const ranked = runs.map((run, index) => {
+    const shortfall = run.points.find((point) => point.expense + 0.01 < point.requestedExpense);
+    return {
+      run,
+      index,
+      depletionAge: shortfall?.age ?? LIFE_EXPECTANCY + 1,
+      lifetimeCorpus: run.points.reduce((sum, point) => sum + point.corpus, 0),
+      terminalCorpus: run.points.at(-1)?.corpus ?? 0,
+    };
+  }).sort((a, b) =>
+    a.depletionAge - b.depletionAge
+    || a.lifetimeCorpus - b.lifetimeCorpus
+    || a.terminalCorpus - b.terminalCorpus
+    || a.index - b.index,
+  );
+  const pick = (outlook: Outlook) => ranked[Math.floor((ranked.length - 1) * percentileIndex[outlook])].index;
+  return { cautious: pick("cautious"), typical: pick("typical"), optimistic: pick("optimistic") };
+}
+export function representativePaths(runs: ReturnType<typeof runPath>[]): Record<Outlook, YearPoint[]> {
+  const indices = representativeRunIndices(runs);
+  const build = (outlook: Outlook) => runs[indices[outlook]].points;
   return { cautious: build("cautious"), typical: build("typical"), optimistic: build("optimistic") };
+}
+
+function representativeRateSummaries(runs: ReturnType<typeof runPath>[], matrix: Shocks[][]): Record<Outlook, RateSummary> {
+  const indices = representativeRunIndices(runs);
+  const summarize = (outlook: Outlook) => {
+    const runIndex = indices[outlook];
+    const yearlyRates = runs[runIndex].points.map((point) => matrix[runIndex][point.age - 20]);
+    return Object.fromEntries((Object.keys(BASE_RATES) as RateKey[]).map((key) => {
+      const values = yearlyRates.map((rates) => rates[key]);
+      return [key, { average: values.reduce((sum, value) => sum + value, 0) / values.length, min: Math.min(...values), max: Math.max(...values) }];
+    })) as RateSummary;
+  };
+  return { cautious: summarize("cautious"), typical: summarize("typical"), optimistic: summarize("optimistic") };
 }
 
 export function calculatePlan(details: Details, dependents: Dependents, loan: Loan, seed = 731942): SimulationResult {
@@ -140,9 +184,11 @@ export function calculatePlan(details: Details, dependents: Dependents, loan: Lo
   const chartAge = retirementAge ?? details.age;
   const runs = matrix.map((shocks) => runPath(details, dependents, loan, chartAge, shocks));
   if (retirementAge === null) successRate = runs.filter((run) => run.success).length / runs.length;
+  const sampledRuns = runs.filter((_, index) => index % 10 === 0);
   return {
-    retirementAge, successRate, paths: percentilePaths(runs), seed,
-    samples: runs.filter((_, index) => index % 10 === 0).map((run) => run.points.map((point) => point.corpus)),
+    retirementAge, successRate, paths: representativePaths(runs), rateSummaries: representativeRateSummaries(runs, matrix), seed,
+    samples: sampledRuns.map((run) => run.points.map((point) => point.corpus)),
+    expenseSamples: sampledRuns.map((run) => run.points.map((point) => point.expense)),
   };
 }
 
@@ -164,15 +210,32 @@ export function recommendationsFor(details: Details, dependents: Dependents, loa
     const middle = (lowExpense + highExpense) / 2;
     if (passes({ ...details, monthlyExpense: middle })) lowExpense = middle; else highExpense = middle;
   }
+  const currentCorpus = details.bankSavings + details.fixedDeposits + details.mutualFunds + details.stocks + details.realEstate;
+  let requiredSavings = details.bankSavings;
+  if (!passes(details)) {
+    let low = details.bankSavings;
+    let high = Math.max(details.bankSavings, 100_000);
+    while (!passes({ ...details, bankSavings: high }) && high < 1_000_000_000_000) high *= 2;
+    for (let i = 0; i < 32; i += 1) {
+      const middle = (low + high) / 2;
+      if (passes({ ...details, bankSavings: middle })) high = middle; else low = middle;
+    }
+    requiredSavings = high;
+  }
   return {
     monthlySip: searchMinimum("monthlySip", Math.max(details.monthlySip, details.monthlyIncome)),
     monthlyIncome: searchMinimum("monthlyIncome", 2_000_000),
     monthlyExpense: passes({ ...details, monthlyExpense: 0 }) ? Math.floor(lowExpense / 500) * 500 : null,
+    requiredCurrentCorpus: Math.ceil((currentCorpus + requiredSavings - details.bankSavings) / 10_000) * 10_000,
   };
 }
 
 export function projectScenario(details: Details, dependents: Dependents, loan: Loan, retirementAge: number, seed = 731942) {
   const matrix = scenarioMatrix(seed);
   const runs = matrix.map((shocks) => runPath(details, dependents, loan, retirementAge, shocks));
-  return { successRate: runs.filter((run) => run.success).length / runs.length, paths: percentilePaths(runs) };
+  return {
+    successRate: runs.filter((run) => run.success).length / runs.length,
+    paths: representativePaths(runs),
+    rateSummaries: representativeRateSummaries(runs, matrix),
+  };
 }
