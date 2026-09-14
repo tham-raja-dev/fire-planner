@@ -33,14 +33,13 @@ test("scenario sheet renders all 100 sampled futures and its complete explanatio
   assert.match(page, /possiblePaths\.slice\(0, 100\)/);
   assert.match(page, /possibleExpensePaths\.slice\(0, 100\)/);
   assert.match(page, /Scenario simulations/);
-  assert.match(page, /multiple possible market scenarios/);
-  assert.doesNotMatch(page, /historical and market scenarios/);
+  assert.match(page, /multiple historical and market scenarios/);
   assert.match(page, /simplified form of Monte Carlo simulations/);
   assert.match(page, />Know more</);
   assert.match(page, />Got it</);
   assert.doesNotMatch(css, /\.scenario-chart \.bar\.expense\s*\{[^}]*display:\s*none/);
   assert.match(css, /\.scenario-chart \.outcome-mode \.bar\.expense\s*\{[^}]*display:\s*none/);
-  assert.match(page, /scenario-rate-grid/);
+  assert.match(page, /scenario-rate-cards/);
 });
 
 test("calculation loading screen follows the annotated Figma behavior", () => {
@@ -52,16 +51,38 @@ test("calculation loading screen follows the annotated Figma behavior", () => {
   assert.match(css, /\.loading-copy\s*\{[^}]*top:\s*556px/);
 });
 
-test("intro and loading use the approved five-projection motion language", () => {
-  assert.match(page, /Array\.from\(\{ length: 5 \}/);
-  assert.match(page, /Five animated financial projections/);
+test("intro and loading use their approved projection motion language", () => {
+  assert.match(page, /Array\.from\(\{ length: 3 \}/);
+  assert.match(page, /Three animated financial projections/);
   assert.match(page, /When can you retire\?/);
   assert.match(page, /See your finances run across multiple scenarios to determine the best age to retire/);
   assert.doesNotMatch(page, />What’s this\?</);
   assert.match(page, /blendProjection\(projection\.paths\.cautious, projection\.paths\.typical, \.5\)/);
   assert.match(page, /blendProjection\(projection\.paths\.typical, projection\.paths\.optimistic, \.5\)/);
-  assert.match(css, /\.intro-projection\s*\{[^}]*animation:\s*projection-crossfade 4s/);
+  assert.doesNotMatch(css, /\.intro-projection\s*\{[^}]*animation:/);
+  assert.match(css, /\.intro-bars i\s*\{[^}]*animation-delay:\s*var\(--bar-wave-delay\)/);
+  assert.match(css, /intro-wave-20-80[\s\S]*animation-duration:\s*5\.33s/);
+  assert.match(css, /intro-wave-five[\s\S]*animation-duration:\s*8\.33s/);
+  assert.match(page, /introWaveDelay\(layer, index/);
+  assert.doesNotMatch(css, /calc\(var\(--bar-height\) \* var\(--wave-scale\)\)/);
   assert.match(css, /\.loading-projection\s*\{[^}]*animation:\s*loading-projection-crossfade 2\.2s/);
+});
+
+test("loading chart hands off smoothly to the final result", () => {
+  assert.match(page, /setLoadingExiting\(true\)/);
+  assert.match(page, /setScreen\("result"\)[\s\S]*900/);
+  assert.match(page, /finalPlan=\{calculatedPlan\} exiting=\{loadingExiting\}/);
+  assert.doesNotMatch(page, /loading-handoff-chart/);
+  assert.match(page, /scaleDomain=\{scaleDomain\}/);
+  assert.match(page, /projectionData=\{\(exiting \|\| showingResult\) && settledPath \? settledPath : path\}/);
+  assert.match(page, /loading-screen \$\{showingResult \? "result-screen" : ""\}/);
+  assert.match(page, /requestAnimationFrame\(\(\) => window\.requestAnimationFrame/);
+  assert.match(page, /\(screen === "loading" \|\| screen === "result"\) && <LoadingScreen/);
+  assert.match(css, /\.loading-screen\.exiting \.loading-visual\s*\{[^}]*top:\s*0[^}]*right:\s*0[^}]*left:\s*0[^}]*height:\s*456px/);
+  assert.match(css, /\.loading-projection \.bar\s*\{[^}]*transition:\s*height \.9s/);
+  assert.match(css, /\.loading-screen\.exiting \.loading-copy\s*\{[^}]*opacity:\s*0/);
+  assert.match(css, /\.loading-screen\.result-screen \.loading-visual\s*\{[^}]*top:\s*0[^}]*height:\s*456px/);
+  assert.doesNotMatch(css, /\.projection-chart\.loading-chart\s*\{[^}]*opacity:/);
 });
 
 test("result actions preserve equal widths and a primary export CTA", () => {

@@ -21,7 +21,7 @@ export type Recommendation = {
 export type SimulationResult = {
   retirementAge: number | null; successRate: number;
   paths: Record<Outlook, YearPoint[]>; rateSummaries: Record<Outlook, RateSummary>;
-  samples: number[][]; expenseSamples: number[][]; seed: number;
+  samples: number[][]; expenseSamples: number[][]; sampleRateSummaries: RateSummary[]; seed: number;
 };
 
 export const BASE_RATES = {
@@ -134,8 +134,8 @@ function successAt(details: Details, dependents: Dependents, loan: Loan, retirem
 }
 
 const percentileIndex: Record<Outlook, number> = { cautious: 0.20, typical: 0.50, optimistic: 0.80 };
-function representativeRunIndices(runs: ReturnType<typeof runPath>[]): Record<Outlook, number> {
-  const ranked = runs.map((run, index) => {
+function rankedRunIndices(runs: ReturnType<typeof runPath>[]) {
+  return runs.map((run, index) => {
     const shortfall = run.points.find((point) => point.expense + 0.01 < point.requestedExpense);
     return {
       run,
@@ -149,9 +149,11 @@ function representativeRunIndices(runs: ReturnType<typeof runPath>[]): Record<Ou
     || a.lifetimeCorpus - b.lifetimeCorpus
     || a.terminalCorpus - b.terminalCorpus
     || a.index - b.index,
-  );
-  const pick = (outlook: Outlook) => ranked[Math.floor((ranked.length - 1) * percentileIndex[outlook])].index;
-  return { cautious: pick("cautious"), typical: pick("typical"), optimistic: pick("optimistic") };
+  ).map(({ index }) => index);
+}
+function representativeRunIndices(runs: ReturnType<typeof runPath>[]): Record<Outlook, number> {
+  const ranked = rankedRunIndices(runs);
+  return { cautious: ranked[Math.floor((ranked.length - 1) * percentileIndex.cautious)], typical: ranked[Math.floor((ranked.length - 1) * percentileIndex.typical)], optimistic: ranked[Math.floor((ranked.length - 1) * percentileIndex.optimistic)] };
 }
 export function representativePaths(runs: ReturnType<typeof runPath>[]): Record<Outlook, YearPoint[]> {
   const indices = representativeRunIndices(runs);
@@ -172,6 +174,14 @@ function representativeRateSummaries(runs: ReturnType<typeof runPath>[], matrix:
   return { cautious: summarize("cautious"), typical: summarize("typical"), optimistic: summarize("optimistic") };
 }
 
+function rateSummaryForRun(run: ReturnType<typeof runPath>, shocks: Shocks[]): RateSummary {
+  const yearlyRates = run.points.map((point) => shocks[point.age - 20]);
+  return Object.fromEntries((Object.keys(BASE_RATES) as RateKey[]).map((key) => {
+    const values = yearlyRates.map((rates) => rates[key]);
+    return [key, { average: values.reduce((sum, value) => sum + value, 0) / values.length, min: Math.min(...values), max: Math.max(...values) }];
+  })) as RateSummary;
+}
+
 export function calculatePlan(details: Details, dependents: Dependents, loan: Loan, seed = 731942): SimulationResult {
   const matrix = scenarioMatrix(seed);
   let retirementAge: number | null = null;
@@ -184,11 +194,14 @@ export function calculatePlan(details: Details, dependents: Dependents, loan: Lo
   const chartAge = retirementAge ?? details.age;
   const runs = matrix.map((shocks) => runPath(details, dependents, loan, chartAge, shocks));
   if (retirementAge === null) successRate = runs.filter((run) => run.success).length / runs.length;
-  const sampledRuns = runs.filter((_, index) => index % 10 === 0);
+  const ranked = rankedRunIndices(runs);
+  const sampledIndices = Array.from({ length: 100 }, (_, index) => ranked[Math.round(index * (ranked.length - 1) / 99)]);
+  const sampledRuns = sampledIndices.map((index) => runs[index]);
   return {
     retirementAge, successRate, paths: representativePaths(runs), rateSummaries: representativeRateSummaries(runs, matrix), seed,
     samples: sampledRuns.map((run) => run.points.map((point) => point.corpus)),
     expenseSamples: sampledRuns.map((run) => run.points.map((point) => point.expense)),
+    sampleRateSummaries: sampledIndices.map((index) => rateSummaryForRun(runs[index], matrix[index])),
   };
 }
 
